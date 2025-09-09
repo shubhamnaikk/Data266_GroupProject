@@ -56,11 +56,7 @@ Natural Language Interfaces to Databases (NLIDBs) are powerful but fragile in re
 
 ## 👥 Team  
 
-- **Shreyas Mohite** – Infrastructure & evaluation  
-- **Shubham Naik** – Modeling & guardrails  
-- **Rutuja Kadam** – RAG, fine-tuning & UI  
-
----
-
-## 📂 Repository Structure  
+- **Shreyas Mohite**  
+- **Shubham Naik**   
+- **Rutuja Kadam** 
 
