@@ -1,0 +1,18 @@
+services:
+  pg:
+    image: postgres:16
+    container_name: dblens_pg
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: demo
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./../sql/init:/docker-entrypoint-initdb.d
+  adminer:
+    image: adminer
+    container_name: dblens_adminer
+    ports: ["8080:8080"]
+volumes:
+  pgdata:
