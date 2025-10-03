@@ -1,4 +1,6 @@
-import time, json, requests
+import time
+import json
+import requests
 
 SMOKES = ["How many rows are in the items table?", "List 2 cheapest items."]
 

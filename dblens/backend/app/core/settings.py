@@ -1,4 +1,4 @@
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     PG_DB: str = "demo"
     PG_USER: str = "dblens_ro"
     PG_PASSWORD: str = "dblens_ro_pw"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
-settings = Settings(_env_file=".env", _env_file_encoding="utf-8")
+settings = Settings()

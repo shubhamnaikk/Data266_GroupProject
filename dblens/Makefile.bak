@@ -1,7 +1,7 @@
 PY=python
 ACT=source .venv/bin/activate
 run-api:
-	$(ACT); uvicorn backend.app.main:app --reload --port 8000 --env-file .env --env-file .env
+	$(ACT); uvicorn backend.app.main:app --reload --port 8000 --env-file .env
 lint:
 	$(ACT); ruff check . && black --check . && mypy backend || true
 fmt:

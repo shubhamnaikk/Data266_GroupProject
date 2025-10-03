@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 import psycopg
 import os
+from backend.app.validators.safety import normalize_sql
 
 
 class DBAgent:
@@ -34,12 +35,14 @@ class DBAgent:
         return [{"column": c[0], "type": c[1], "nullable": c[2]} for c in cols]
 
     def explain(self, sql: str) -> Dict[str, Any]:
+        sql = normalize_sql(sql)
         with self._conn.cursor() as cur:
             cur.execute("EXPLAIN (FORMAT JSON) " + sql)
-            plan = cur.fetchone()[0][0]
+            plan = cur.fetchone()[0][0]  # first item of JSON array
         return plan
 
     def sample(self, sql: str, limit: int = 100):
+        sql = normalize_sql(sql)
         sql_lower = sql.lower()
         sql_limited = (
             sql if " limit " in sql_lower else f"SELECT * FROM ({sql}) t LIMIT {limit}"
@@ -51,4 +54,5 @@ class DBAgent:
         return {"columns": cols, "rows": rows}
 
     def execute_readonly(self, sql: str):
+        sql = normalize_sql(sql)
         return self.sample(sql, limit=1000)
