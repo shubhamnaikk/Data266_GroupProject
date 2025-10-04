@@ -1,34 +1,37 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from starlette.requests import Request
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from backend.app.core.logging import init_logging
-from backend.app.routers import ask
-from backend.app.routers import lint
-from backend.app.routers import approve
+from loguru import logger
+import os
 
-init_logging()
-app = FastAPI(title="DBLens")
+# Routers (ensure we import only the routers we expose)
+from backend.app.routers import ask, approve, lint, history
+
+app = FastAPI(title="DBLens", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(ask.router, prefix="/v1")
-app.include_router(approve.router, prefix="/v1")
-app.include_router(lint.router, prefix="/v1")
+
+def api_key_guard(x_api_key: str | None = Header(default=None)):
+    need = os.getenv("API_KEY")
+    if need and x_api_key != need:
+        raise HTTPException(status_code=401, detail="invalid api key")
+
+
+# Mount routers with guard
+app.include_router(ask.router, prefix="/v1", dependencies=[Depends(api_key_guard)])
+app.include_router(approve.router, prefix="/v1", dependencies=[Depends(api_key_guard)])
+app.include_router(lint.router, prefix="/v1", dependencies=[Depends(api_key_guard)])
+app.include_router(history.router, prefix="/v1", dependencies=[Depends(api_key_guard)])
+# Note: 'explain' router is not imported here - keep imports consistent with codebase
 
 
 @app.exception_handler(Exception)
 async def _unhandled_error(request: Request, exc: Exception):
-    # Ensure we *always* return JSON even on unexpected errors
-    from loguru import logger
-
-    logger.exception("unhandled")
-    return JSONResponse(
-        {"error": "internal_server_error", "detail": str(exc)[:200]}, status_code=500
-    )
+    logger.error("unhandled", exception=exc)
+    # re-raise so FastAPI generates the proper error response
+    raise exc

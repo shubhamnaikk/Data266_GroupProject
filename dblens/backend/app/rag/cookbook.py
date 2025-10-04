@@ -1,5 +1,6 @@
 import re
 from typing import List, Dict, Optional
+from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 
 
@@ -19,7 +20,10 @@ def _extract_threshold(q: str) -> float:
 
 def suggest_from_cookbook(question: str, ctx: List[Dict]) -> Optional[str]:
     try:
-        spec = yaml.safe_load(open("backend/app/rag/cookbook.yaml"))
+        # load cookbook.yaml relative to this module so code works regardless
+        # of current working directory when tests run
+        yaml_path = Path(__file__).parent / "cookbook.yaml"
+        spec = yaml.safe_load(yaml_path.read_text())
     except Exception:
         return None
 
