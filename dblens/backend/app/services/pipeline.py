@@ -1,6 +1,7 @@
 from typing import TypedDict, List, cast
 from backend.app.agents.sdk import DBAgent
 from backend.app.agents.sqlgen import generate_sql_candidates
+from backend.app.rag.cookbook import suggest_from_cookbook
 from backend.app.rag.schema_cards import build_schema_cards
 from backend.app.rag.retriever import retrieve_schema_cards
 from backend.app.validators.safety import (
@@ -26,6 +27,10 @@ _SCHEMA_CARDS = build_schema_cards()
 def ask_plan_approve(question: str):
     ctx = retrieve_schema_cards(question, _SCHEMA_CARDS, k=3)
     candidate_sqls = generate_sql_candidates(question, ctx, n=3)
+    # prepend cookbook suggestion if available
+    cb = suggest_from_cookbook(question, ctx)
+    if cb:
+        candidate_sqls = [cb] + candidate_sqls
     if not candidate_sqls:
         candidate_sqls = ["SELECT 1"]
 

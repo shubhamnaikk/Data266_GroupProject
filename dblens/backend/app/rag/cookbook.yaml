@@ -1,0 +1,13 @@
+# super-simple starter cookbook of query patterns
+patterns:
+  - name: count_rows
+    when_any: ["count", "how many", "number of rows"]
+    sql: "SELECT COUNT(*) FROM {table}"
+  - name: top_n_rows
+    when_any: ["show", "list", "first", "top", "sample", "rows"]
+    sql: "SELECT * FROM {table} LIMIT {n}"
+    default_n: 5
+  - name: price_filter_under
+    when_any: ["price <", "under", "cheaper than", "below"]
+    sql: "SELECT * FROM {table} WHERE price < {threshold} LIMIT 100"
+    default_threshold: 1

@@ -36,3 +36,12 @@ def add_preview_limit(sql: str, default_limit: int = 100) -> str:
     if " limit " in low:
         return sql
     return f"SELECT * FROM ({sql}) t LIMIT {default_limit}"
+
+
+def summarize_plan(plan: dict) -> dict:
+    p = plan.get("Plan", {}) if isinstance(plan, dict) else {}
+    return {
+        "node": p.get("Node Type"),
+        "est_rows": p.get("Plan Rows"),
+        "est_cost": p.get("Total Cost") or p.get("Startup Cost"),
+    }

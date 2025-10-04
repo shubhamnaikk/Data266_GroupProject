@@ -4,6 +4,7 @@ from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from backend.app.core.logging import init_logging
 from backend.app.routers import ask
+from backend.app.routers import lint
 from backend.app.routers import approve
 
 init_logging()
@@ -19,6 +20,7 @@ app.add_middleware(
 
 app.include_router(ask.router, prefix="/v1")
 app.include_router(approve.router, prefix="/v1")
+app.include_router(lint.router, prefix="/v1")
 
 
 @app.exception_handler(Exception)
