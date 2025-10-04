@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-# run tests using the project's venv and correct PYTHONPATH
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$DIR"
-# shellcheck disable=SC1091
-source .venv/bin/activate
-PYTHONPATH=. pytest -q "$@"
