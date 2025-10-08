@@ -1,0 +1,34 @@
+SHELL := /bin/bash
+
+.DEFAULT_GOAL := help
+
+help: ## Show targets
+	@awk 'BEGIN {FS = ":.*?## "}; /^[a-zA-Z0-9_-]+:.*?## /{printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+up: ## Build and start containers
+	docker compose up -d --build
+
+down: ## Stop and remove containers
+	docker compose down -v
+
+logs: ## Tail Postgres logs
+	docker compose logs -f postgres
+
+psql-app: ## psql into Postgres as app_ro (read-only)
+	docker compose exec postgres psql "postgresql://app_ro:app_ro_pass@localhost:5432/dblens"
+
+psql-loader: ## psql into Postgres as loader_rw
+	docker compose exec postgres psql "postgresql://loader_rw:loader_rw_pass@localhost:5432/dblens"
+
+ingest: ## Ingest a dataset from URL. Usage: make ingest URL=https://... TABLE=my_table [FORMAT=auto]
+	docker compose run --rm ingester python /app/load_from_url.py --url "$(URL)" --table "$(TABLE)" --format "$(FORMAT)"
+
+schema: ## Print schema cards JSON
+	docker compose run --rm ingester python /app/dbtools.py schema-cards --out /tmp/schema_cards.json && \
+	docker compose run --rm ingester bash -lc 'jq . /tmp/schema_cards.json | head -200'
+
+preview: ## Preview rows for a SQL. Usage: make preview SQL="select * from my_table limit 5"
+	docker compose run --rm ingester python /app/dbtools.py preview --sql "$(SQL)"
+
+validate: ## Explain/validate a SQL. Usage: make validate SQL="select * from my_table limit 5"
+	docker compose run --rm ingester python /app/dbtools.py validate --sql "$(SQL)"

@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+import argparse, os, sys, json
+import psycopg
+
+def get_dsn(role="app"):
+    dsn = os.environ.get("APP_RO_DSN") if role == "app" else os.environ.get("LOADER_RW_DSN")
+    if not dsn:
+        print("Missing DSN env var", file=sys.stderr)
+        sys.exit(2)
+    return dsn
+
+def _pk_cols(conn, schema, table):
+    q = """
+    SELECT kcu.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema = kcu.table_schema
+     AND tc.table_name   = kcu.table_name
+    WHERE tc.constraint_type='PRIMARY KEY'
+      AND tc.table_schema=%s AND tc.table_name=%s
+    ORDER BY kcu.ordinal_position
+    """
+    return [r[0] for r in conn.execute(q, (schema, table)).fetchall()]
+
+def _fk_cols(conn, schema, table):
+    q = """
+    SELECT
+      kcu.column_name,
+      ccu.table_schema AS foreign_table_schema,
+      ccu.table_name   AS foreign_table_name,
+      ccu.column_name  AS foreign_column_name
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema    = kcu.table_schema
+    JOIN information_schema.constraint_column_usage AS ccu
+      ON ccu.constraint_name = tc.constraint_name
+     AND ccu.table_schema    = tc.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_schema=%s AND tc.table_name=%s
+    """
+    rows = conn.execute(q, (schema, table)).fetchall()
+    return [{"column": r[0], "ref_table": f"{r[1]}.{r[2]}", "ref_column": r[3]} for r in rows]
+
+def schema_cards():
+    dsn = get_dsn("app")
+    out = {"tables": []}
+    with psycopg.connect(dsn) as conn:
+        tables = conn.execute("""
+            SELECT c.relname AS table_name, n.nspname AS schema_name
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind='r' AND n.nspname='public'
+            ORDER BY 1
+        """).fetchall()
+
+        for (table, schema) in tables:
+            cols = conn.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema=%s AND table_name=%s
+                ORDER BY ordinal_position
+            """, (schema, table)).fetchall()
+
+            rc = conn.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass",
+                              (f"{schema}.{table}",)).fetchone()[0]
+
+            samples = {}
+            for (col, _) in cols:
+                try:
+                    vals = conn.execute(f"SELECT {col} FROM {schema}.{table} ORDER BY random() LIMIT 5").fetchall()
+                    samples[col] = [v[0] for v in vals]
+                except Exception:
+                    samples[col] = []
+
+            out["tables"].append({
+                "schema": schema,
+                "name": table,
+                "row_estimate": rc,
+                "columns": [{"name": c, "type": t} for (c, t) in cols],
+                "primary_key": _pk_cols(conn, schema, table),
+                "foreign_keys": _fk_cols(conn, schema, table),
+                "samples": samples
+            })
+    return out
+
+def preview(sql_text: str, limit=20):
+    dsn = get_dsn("app")
+    with psycopg.connect(dsn) as conn:
+        conn.execute("SET statement_timeout = '5000ms'")
+        rows = conn.execute(f"WITH cte AS ({sql_text}) SELECT * FROM cte LIMIT %s", (limit,)).fetchall()
+        return rows
+
+def explain(sql_text: str):
+    dsn = get_dsn("app")
+    with psycopg.connect(dsn) as conn:
+        plan = conn.execute("EXPLAIN (FORMAT JSON) " + sql_text).fetchone()[0]
+        root = plan[0].get("Plan", {})
+        total_cost = root.get("Total Cost")
+        est_rows = root.get("Plan Rows")
+        plan_width = root.get("Plan Width")
+        return {"explain_json": plan, "total_cost": total_cost, "est_rows": est_rows, "plan_width": plan_width}
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sc = sub.add_parser("schema-cards")
+    sc.add_argument("--out", default="/tmp/schema_cards.json")
+
+    pv = sub.add_parser("preview")
+    pv.add_argument("--sql", required=True)
+    pv.add_argument("--limit", type=int, default=20)
+
+    vd = sub.add_parser("validate")
+    vd.add_argument("--sql", required=True)
+
+    args = ap.parse_args()
+
+    if args.cmd == "schema-cards":
+        data = schema_cards()
+        with open(args.out, "w") as f:
+            json.dump({"SchemaCard": data}, f, indent=2, default=str)
+        print(args.out)
+    elif args.cmd == "preview":
+        rows = preview(args.sql, args.limit)
+        for r in rows: print(r)
+    elif args.cmd == "validate":
+        rep = explain(args.sql)
+        print(json.dumps(rep, indent=2))
+
+if __name__ == "__main__":
+    main()

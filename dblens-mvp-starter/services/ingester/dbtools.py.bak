@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+import argparse, os, sys, json
+import psycopg
+
+def get_dsn(role="app"):
+    if role == "app":
+        dsn = os.environ.get("APP_RO_DSN")
+    else:
+        dsn = os.environ.get("LOADER_RW_DSN")
+    if not dsn:
+        print("Missing DSN env var", file=sys.stderr)
+        sys.exit(2)
+    return dsn
+
+def schema_cards():
+    dsn = get_dsn("app")
+    out = {"tables": []}
+    with psycopg.connect(dsn) as conn:
+        tables = conn.execute("""
+            SELECT c.relname AS table_name, n.nspname AS schema_name
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind='r' AND n.nspname='public'
+            ORDER BY 1
+        """).fetchall()
+
+        for (table, schema) in tables:
+            cols = conn.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema=%s AND table_name=%s
+                ORDER BY ordinal_position
+            """, (schema, table)).fetchall()
+
+            # Approx row count via reltuples
+            rc = conn.execute("""
+                SELECT reltuples::bigint FROM pg_class
+                WHERE oid = %s::regclass
+            """, (f"{schema}.{table}",)).fetchone()[0]
+
+            # Sample values per column
+            samples = {}
+            for (col, _) in cols:
+                try:
+                    vals = conn.execute(
+                        f"SELECT {col} FROM {schema}.{table} ORDER BY random() LIMIT 5"
+                    ).fetchall()
+                    samples[col] = [v[0] for v in vals]
+                except Exception:
+                    samples[col] = []
+
+            out["tables"].append({
+                "schema": schema,
+                "name": table,
+                "row_estimate": rc,
+                "columns": [{"name": c, "type": t} for (c, t) in cols],
+                "samples": samples
+            })
+    return out
+
+def preview(sql_text: str, limit=20):
+    dsn = get_dsn("app")
+    with psycopg.connect(dsn) as conn:
+        conn.execute("SET statement_timeout = '5000ms'")
+        rows = conn.execute(f"WITH cte AS ({sql_text}) SELECT * FROM cte LIMIT %s", (limit,)).fetchall()
+        return rows
+
+def explain(sql_text: str):
+    dsn = get_dsn("app")
+    with psycopg.connect(dsn) as conn:
+        plan = conn.execute("EXPLAIN (FORMAT JSON) " + sql_text).fetchone()[0]
+        # plan is a list with a single dict
+        root = plan[0].get("Plan", {})
+        total_cost = root.get("Total Cost")
+        est_rows = root.get("Plan Rows")
+        return {"explain_json": plan, "total_cost": total_cost, "est_rows": est_rows}
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sc = sub.add_parser("schema-cards")
+    sc.add_argument("--out", default="/tmp/schema_cards.json")
+
+    pv = sub.add_parser("preview")
+    pv.add_argument("--sql", required=True)
+    pv.add_argument("--limit", type=int, default=20)
+
+    vd = sub.add_parser("validate")
+    vd.add_argument("--sql", required=True)
+
+    args = ap.parse_args()
+
+    if args.cmd == "schema-cards":
+        data = schema_cards()
+        with open(args.out, "w") as f:
+            json.dump({"SchemaCard": data}, f, indent=2, default=str)
+        print(args.out)
+    elif args.cmd == "preview":
+        rows = preview(args.sql, args.limit)
+        for r in rows:
+            print(r)
+    elif args.cmd == "validate":
+        rep = explain(args.sql)
+        print(json.dumps(rep, indent=2))
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,47 @@
+from fastapi import FastAPI
+from pydantic import BaseModel
+import subprocess
+import dbtools  # local helpers for schema/preview/validate
+
+app = FastAPI(title="DBLens MVP API")
+
+class FromURL(BaseModel):
+    url: str
+    table: str
+    format: str = "auto"
+    if_exists: str = "fail"
+    schema: str = "public"
+
+@app.post("/datasets/from-url")
+def from_url(p: FromURL):
+    cmd = [
+        "python", "/app/load_from_url.py",
+        "--url", p.url,
+        "--table", p.table,
+        "--format", p.format,
+        "--schema", p.schema,
+        "--if-exists", p.if_exists,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return {
+        "ok": proc.returncode == 0,
+        "stdout": proc.stdout[-8000:],
+        "stderr": proc.stderr[-8000:]
+    }
+
+@app.get("/schema/cards")
+def schema_cards():
+    return {"SchemaCard": dbtools.schema_cards()}
+
+class SQL(BaseModel):
+    sql: str
+    limit: int | None = None
+
+@app.post("/preview")
+def preview(p: SQL):
+    rows = dbtools.preview(p.sql, p.limit or 20)
+    return {"rows": [list(r) for r in rows]}
+
+@app.post("/validate")
+def validate(p: SQL):
+    return dbtools.explain(p.sql)

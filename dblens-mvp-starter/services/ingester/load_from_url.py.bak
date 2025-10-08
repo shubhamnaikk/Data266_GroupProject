@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+import argparse, os, sys, io, re, json, csv, gzip, zipfile, hashlib, time, tempfile
+from urllib.parse import urlparse
+import requests
+try:
+    import magic
+    HAVE_MAGIC = True
+except Exception:
+    magic = None
+    HAVE_MAGIC = False
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import psycopg
+from psycopg import sql
+
+
+MAX_BYTES_DEFAULT = 250 * 1024 * 1024  # 250MB
+
+def sanitize_identifier(name: str) -> str:
+    name = name.strip().lower()
+    name = re.sub(r'[^a-z0-9_]+', '_', name)
+    name = re.sub(r'^(\d)', r'_\1', name)
+    name = re.sub(r'_+', '_', name).strip('_')
+    return name or 'col'
+
+def map_dtype_to_pg(series: pd.Series) -> str:
+    dtype = str(series.dtype)
+    if dtype.startswith('int'):
+        return 'bigint'
+    if dtype.startswith('float'):
+        return 'double precision'
+    if dtype == 'bool':
+        return 'boolean'
+    if dtype.startswith('datetime64'):
+        return 'timestamp'
+    # Heuristic: detect dates in object
+    if dtype == 'object':
+        sample = series.dropna().astype(str).head(200)
+        if len(sample) > 10:
+            sample = sample.sample(10, random_state=42)
+        parsed = pd.to_datetime(sample, errors='coerce', utc=False, infer_datetime_format=True)
+        if parsed.notna().mean() >= 0.7:
+            # Check if they look like date-only (many have 00:00:00)
+            if all((str(x).endswith('00:00:00') or '00:00:00' in str(x)) for x in parsed.dropna().head(5)):
+                return 'date'
+            return 'timestamp'
+    return 'text'
+
+def infer_schema(df: pd.DataFrame):
+    cols = []
+    seen = set()
+    for c in df.columns:
+        name = sanitize_identifier(str(c))
+        i = 1
+        base = name
+        while name in seen:
+            i += 1
+            name = f"{base}_{i}"
+        seen.add(name)
+        cols.append((c, name, map_dtype_to_pg(df[c])))
+    return cols
+
+def sniff_format(url, explicit_format, tmp_path):
+    if explicit_format and explicit_format != 'auto':
+        return explicit_format.lower()
+
+    # Check magic/MIME
+    try:
+        mime = magic.Magic(mime=True).from_file(tmp_path)
+    except Exception:
+        mime = ''
+
+    # Extension hints
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    if ext in ('.csv', '.tsv'):
+        return 'csv'
+    if ext in ('.parquet', '.pq'):
+        return 'parquet'
+    if ext in ('.json', '.ndjson'):
+        return 'json'
+
+    # MIME fallbacks
+    if 'parquet' in mime:
+        return 'parquet'
+    if 'json' in mime:
+        return 'json'
+    if 'csv' in mime or 'text/plain' in mime:
+        return 'csv'
+
+    return 'csv'  # safe default
+
+def stream_download(url, max_bytes=MAX_BYTES_DEFAULT):
+    sha256 = hashlib.sha256()
+    r = requests.get(url, stream=True, timeout=30)
+    r.raise_for_status()
+    total = 0
+    fd, path = tempfile.mkstemp(prefix="dblens_", dir="/tmp")
+    with os.fdopen(fd, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024*1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError(f"Download exceeds max_bytes={max_bytes}")
+            sha256.update(chunk)
+            f.write(chunk)
+    return path, total, sha256.hexdigest()
+
+def read_df(path, fmt):
+    # Decompress gzip/zip transparently
+    work_path = path
+    # gzip
+    with open(path, 'rb') as f:
+        sig = f.read(4)
+    if sig.startswith(b'\\x1f\\x8b'):
+        with gzip.open(path, 'rb') as gz, tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as out:
+            out.write(gz.read())
+            work_path = out.name
+    # zip
+    elif sig.startswith(b'PK\\x03\\x04'):
+        with zipfile.ZipFile(path) as zf:
+            names = [n for n in zf.namelist() if not n.endswith('/')]
+            if not names:
+                raise RuntimeError("Zip file is empty")
+            first = names[0]
+            with zf.open(first) as z, tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as out:
+                out.write(z.read())
+                work_path = out.name
+
+    if fmt == 'csv':
+        # Let pandas sniff delimiter/quote; low_memory=False for better type inference
+        df = pd.read_csv(work_path, low_memory=False)
+    elif fmt == 'parquet':
+        df = pq.read_table(work_path).to_pandas()
+    elif fmt == 'json':
+        df = pd.read_json(work_path, lines=True)
+    else:
+        raise RuntimeError(f"Unsupported format: {fmt}")
+    return df
+
+def create_table_and_copy(conn, table, df, inferred_cols):
+    # Create table
+    cols_sql = ", ".join([f"{pg} {typ}" for _, pg, typ in inferred_cols])
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("CREATE TABLE {} ({});").format(
+            sql.Identifier(table), sql.SQL(cols_sql)
+        ))
+
+    # COPY via CSV to handle all formats uniformly
+    tmp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir="/tmp").name
+    df.to_csv(tmp_csv, index=False, quoting=csv.QUOTE_MINIMAL)
+    with open(tmp_csv, "r", encoding="utf-8") as f, conn.cursor() as cur:
+        cols = [pg for _, pg, _ in inferred_cols]
+        cur.copy(sql.SQL("COPY {} ({}) FROM STDIN WITH (FORMAT csv, HEADER true, QUOTE '\"')")
+                 .format(sql.Identifier(table), sql.SQL(", ").join(map(sql.Identifier, cols))), f)
+
+def add_helpful_indexes(conn, table, inferred_cols):
+    candidates = []
+    for _, pg, typ in inferred_cols:
+        if pg in ("id", f"{table}_id"):
+            candidates.append(pg)
+        if typ in ("date", "timestamp") and (pg.endswith("_date") or pg.endswith("date") or pg.endswith("_at")):
+            candidates.append(pg)
+    for col in set(candidates):
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} ({})").format(
+                sql.Identifier(f"{table}_{col}_idx"),
+                sql.Identifier(table),
+                sql.Identifier(col)
+            ))
+
+def record_provenance(conn, url, table, fmt, row_count, nbytes, sha256, columns, errors=None):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ingestion_log (url, table_name, format, row_count, bytes, sha256, columns_json, errors_json) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (url, table, fmt, int(row_count), int(nbytes), sha256, json.dumps(columns), json.dumps(errors or {}))
+        )
+
+def main():
+    ap = argparse.ArgumentParser(description="Create & load a Postgres table from a URL (CSV/Parquet/JSON Lines).")
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--table", required=True, help="Target table name (snake_case recommended)")
+    ap.add_argument("--schema", default="public")
+    ap.add_argument("--format", default="auto", choices=["auto","csv","parquet","json"])
+    ap.add_argument("--sample-rows", type=int, default=10000)
+    ap.add_argument("--max-bytes", type=int, default=MAX_BYTES_DEFAULT)
+    ap.add_argument("--if-exists", default="fail", choices=["fail","replace"])
+    args = ap.parse_args()
+
+    dsn = os.environ.get("LOADER_RW_DSN")
+    if not dsn:
+        print("LOADER_RW_DSN is not set", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"Downloading: {args.url}")
+    path, nbytes, sha = stream_download(args.url, max_bytes=args.max_bytes)
+    fmt = sniff_format(args.url, args.format, path)
+    print(f"Detected format: {fmt} • size={nbytes} bytes")
+
+    print("Reading data...")
+    df = read_df(path, fmt)
+    if args.sample_rows and len(df) > args.sample_rows:
+        df_head = df.head(args.sample_rows)
+    else:
+        df_head = df
+
+    inferred = infer_schema(df_head)
+    columns_meta = [{"original": orig, "name": pg, "type": typ} for (orig, pg, typ) in inferred]
+    print("Inferred schema:")
+    for c in columns_meta:
+        print(f"  {c['name']} {c['type']}  (from '{c['original']}')")
+
+    target_table = sanitize_identifier(args.table)
+    fqtn = f"{args.schema}.{target_table}" if args.schema else target_table
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        # Handle if-exists
+        exists = conn.execute(
+            "SELECT to_regclass(%s) IS NOT NULL", (fqtn,)
+        ).fetchone()[0]
+        if exists:
+            if args.if_exists == "replace":
+                print(f"Table {fqtn} exists; dropping...")
+                conn.execute(f"DROP TABLE {fqtn};")
+            else:
+                raise RuntimeError(f"Table {fqtn} already exists. Use --if-exists replace to overwrite.")
+
+        print(f"Creating table {fqtn} and loading data...")
+        with conn.cursor() as cur:
+            cur.execute(f"SET search_path TO {args.schema};")
+
+        create_table_and_copy(conn, target_table, df, inferred)
+        add_helpful_indexes(conn, target_table, inferred)
+
+        # Row count
+        row_count = conn.execute(f"SELECT COUNT(*) FROM {fqtn};").fetchone()[0]
+        print(f"Loaded {row_count} rows into {fqtn}")
+
+        record_provenance(conn, args.url, fqtn, fmt, row_count, nbytes, sha, columns_meta, errors={})
+
+    print("Done. Provenance recorded in ingestion_log.")
+
+if __name__ == "__main__":
+    main()
