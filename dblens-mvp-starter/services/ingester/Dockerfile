@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Core + API + connectors (single pip line)
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir  pymysql==1.1.0 snowflake-connector-python==3.10.0 sqlglot==25.6.0\
     fastapi==0.112.2 \
     uvicorn[standard]==0.30.6 \
     psycopg[binary]==3.2.1 \

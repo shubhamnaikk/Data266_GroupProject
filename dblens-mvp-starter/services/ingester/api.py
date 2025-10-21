@@ -224,3 +224,10 @@ def approve(body: SQLBody):
 def from_url(body: FromURL):
     # delegate to existing loader script via simple call (kept for backward-compat)
     return {"ok": True, "note": "URL ingestion retained; Person B/C may hide it in UI later."}
+
+# --- connector registry (inserted) ---
+KIND_TO_CONNECTOR = {}
+try:
+    KIND_TO_CONNECTOR.update({'mysql': MySQLConnector, 'snowflake': SnowflakeConnector})
+except NameError:
+    pass
