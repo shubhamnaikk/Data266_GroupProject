@@ -127,7 +127,7 @@ def schema_cards(conn_id: Optional[int] = Query(None)):
                   VALUES (%s,%s,%s,%s,now())
                   ON CONFLICT(conn_id, table_fqn) DO UPDATE
                   SET columns_json=EXCLUDED.columns_json, samples_json=EXCLUDED.samples_json, refreshed_at=now()
-                """,(conn_id, fqn, json.dumps(t.get("columns", []), default=_jd), json.dumps(t.get("samples", {}), default=_jd)))
+                """,(conn_id, fqn, json.dumps(t.get("columns", [], default=_jd), default=_jd), json.dumps(t.get("samples", {}, default=_jd), default=_jd)))
         return {"SchemaCard": card}
     # fallback: existing local view (for backward compat)
     with get_cp_conn(False) as cp, cp.cursor(row_factory=dict_row) as cur:
