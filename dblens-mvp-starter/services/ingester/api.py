@@ -17,6 +17,8 @@ from fastapi import FastAPI, HTTPException, Body, Query
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import os, json, hashlib, time
+from datetime import datetime
+import logging
 import psycopg
 from psycopg.rows import dict_row
 
@@ -70,6 +72,106 @@ class SQLBody(BaseModel):
     conn_id: Optional[int] = None
     limit: Optional[int] = None
     question: Optional[str] = None
+
+class RootResponse(BaseModel):
+    service: str
+    version: str
+    description: str
+    docs_url: str
+    health_url: str
+    endpoints: Dict[str, str]
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    database: Dict[str, str]
+    uptime: Optional[str] = None
+    errors: Optional[List[str]] = None
+
+# -------------------- Root Endpoint --------------------
+@app.get("/", response_model=RootResponse)
+def root():
+    """Root endpoint providing API information and available endpoints."""
+    try:
+        return RootResponse(
+            service="DBLens MVP",
+            version="1.0.0",
+            description="Plug & Play Database Analytics API",
+            docs_url="/docs",
+            health_url="/health",
+            endpoints={
+                "connections": "/connections",
+                "schema": "/schema/cards",
+                "preview": "/preview",
+                "validate": "/validate",
+                "approve": "/approve",
+                "datasets": "/datasets/from-url"
+            }
+        )
+    except Exception as e:
+        logging.error(f"Root endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/health", response_model=HealthResponse)
+def health_check():
+    """Health check endpoint for monitoring API and database connectivity."""
+    try:
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        database_status = {}
+        errors = []
+        overall_status = "healthy"
+        
+        # Test APP_RO_DSN connection
+        try:
+            with get_cp_conn(False) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+            database_status["app_ro"] = "connected"
+        except Exception as e:
+            database_status["app_ro"] = f"error: {str(e)}"
+            errors.append(f"APP_RO_DSN connection failed: {str(e)}")
+            overall_status = "unhealthy"
+            logging.error(f"Health check - APP_RO_DSN connection failed: {e}")
+        
+        # Test LOADER_RW_DSN connection
+        try:
+            with get_cp_conn(True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+            database_status["loader_rw"] = "connected"
+        except Exception as e:
+            database_status["loader_rw"] = f"error: {str(e)}"
+            errors.append(f"LOADER_RW_DSN connection failed: {str(e)}")
+            overall_status = "unhealthy"
+            logging.error(f"Health check - LOADER_RW_DSN connection failed: {e}")
+        
+        response_data = {
+            "status": overall_status,
+            "timestamp": timestamp,
+            "database": database_status
+        }
+        
+        if errors:
+            response_data["errors"] = errors
+        
+        # Log health check results
+        if overall_status == "unhealthy":
+            logging.warning(f"Health check failed with errors: {errors}")
+        
+        # Return appropriate HTTP status code
+        if overall_status == "unhealthy":
+            raise HTTPException(status_code=503, detail=response_data)
+        
+        return HealthResponse(**response_data)
+        
+    except HTTPException:
+        # Re-raise HTTPException (503 for unhealthy status)
+        raise
+    except Exception as e:
+        logging.error(f"Health check endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
 # -------------------- Connections --------------------
 @app.post("/connections")
